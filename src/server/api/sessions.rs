@@ -929,14 +929,18 @@ pub async fn rename_session(
                 // the response only lands once the stale container is gone; an
                 // immediate restart must not race the removal and revive it.
                 if path != current_path {
-                    let id = id.clone();
+                    let id_for_discard = id.clone();
                     let _ = tokio::task::spawn_blocking(move || {
                         crate::session::worktree_edit::discard_sandbox_container_after_move(
-                            &id,
+                            &id_for_discard,
                             is_sandboxed,
                         )
                     })
                     .await;
+                    // Tear the worker down so its cached cwd (the old path) cannot
+                    // respawn into the now-moved directory. The next prompt spawns
+                    // fresh at the new path; acp_session_id was cleared above.
+                    let _ = state.acp_supervisor.shutdown(&id).await;
                 }
                 new_path = Some(path);
                 new_branch = branch;
@@ -1239,6 +1243,10 @@ pub async fn set_worktree_name(
             )
         })
         .await;
+        // Tear the worker down so its cached cwd (the old path) cannot respawn
+        // into the now-moved directory. The next prompt spawns fresh at the new
+        // path; apply_worktree_name_edit clears the stored acp_session_id.
+        let _ = state.acp_supervisor.shutdown(&id).await;
     }
 
     // The git move has already landed, so persist to disk BEFORE mutating
@@ -1304,11 +1312,21 @@ pub async fn set_worktree_name(
 }
 
 fn apply_worktree_name_edit(inst: &mut Instance, new_path: &str, new_branch: Option<&str>) {
+    let dir_moved = inst.project_path != new_path;
     inst.project_path = new_path.to_string();
     if let Some(branch) = new_branch {
         if let Some(wt) = inst.worktree_info.as_mut() {
             wt.branch = branch.to_string();
         }
+    }
+    if dir_moved {
+        // The worktree directory moved, so the agent's persisted session
+        // captured the old cwd: re-sending it as `session/load` makes the
+        // structured-view worker crash with `Path "<old>" does not exist` and
+        // burn its restart budget. Drop the stored ACP session id so the next
+        // spawn starts a fresh `session/new` rooted at the new path. The caller
+        // also shuts the live worker down so its cached cwd cannot respawn.
+        inst.acp_session_id = None;
     }
 }
 
@@ -5198,6 +5216,25 @@ mod tests {
             inst.worktree_info.as_ref().map(|wt| wt.branch.as_str()),
             Some("newer")
         );
+    }
+
+    #[test]
+    fn worktree_name_edit_clears_stored_acp_session_on_move() {
+        let mut inst = make_test_instance();
+        inst.project_path = "/tmp/repo-worktrees/old".to_string();
+        inst.acp_session_id = Some("claude-sess-old-cwd".to_string());
+
+        // A real move (path changes) drops the stored ACP session id so the
+        // next spawn does session/new at the new path instead of session/load
+        // into the gone directory (the crash this fixes).
+        apply_worktree_name_edit(&mut inst, "/tmp/repo-worktrees/new", None);
+        assert_eq!(inst.acp_session_id, None);
+
+        // A no-op edit (same path, e.g. a branch-only rename) keeps the
+        // resumable session: the cwd is unchanged so session/load is still valid.
+        inst.acp_session_id = Some("claude-sess-stable".to_string());
+        apply_worktree_name_edit(&mut inst, "/tmp/repo-worktrees/new", Some("renamed-branch"));
+        assert_eq!(inst.acp_session_id.as_deref(), Some("claude-sess-stable"));
     }
 
     #[test]
