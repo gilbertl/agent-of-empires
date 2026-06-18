@@ -2795,6 +2795,18 @@ impl HomeView {
 
         groups.push((2, mk(if strict { "N" } else { "n" }, "New")));
 
+        // New-from-selection: prefills the dialog's path from the highlighted
+        // session/project so the session lands in that dir instead of the cwd
+        // `aoe` launched from, and jumps focus to the title. Only meaningful
+        // when something is selected (`open_new_from_selection` no-ops
+        // otherwise), so gate the hint on a selection and keep it lower
+        // priority than plain New so it drops first on narrow panes. Surfacing
+        // it here closes the discoverability gap from #2262: the shortcut was
+        // only in the `?` help and command palette before.
+        if self.selected_session.is_some() || self.selected_group.is_some() {
+            groups.push((4, mk(if strict { "^N" } else { "N" }, "Here")));
+        }
+
         // Priority 1: user's core daily workflow (message / del).
         // These survive the greedy pack under narrow-pane widths (iPad
         // Termius / Moshi ~80 cols) because they're the actions the user

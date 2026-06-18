@@ -5799,6 +5799,64 @@ fn footer_hides_attention_workflow_hints_outside_attention_sort() {
     );
 }
 
+/// Footer advertises the new-from-selection shortcut (`N Here`) only when a
+/// session or group is selected. With nothing selected,
+/// `open_new_from_selection` is a no-op, so the hint would point at a dead
+/// key; the plain `n New` hint stays in both states. Guards the discoverability
+/// fix for #2262.
+#[test]
+#[serial]
+fn footer_shows_new_from_selection_hint_only_with_selection() {
+    use crate::tui::styles::load_theme;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    let mut env = create_test_env_with_sessions(1);
+    let theme = load_theme("empire");
+
+    let render_footer = |env: &mut TestEnv| -> String {
+        let backend = TestBackend::new(200, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                env.view.render(f, area, &theme, None, None, None);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    };
+
+    // No selection: only the plain New hint, no selection-scoped variant.
+    env.view.selected_session = None;
+    env.view.selected_group = None;
+    let no_sel = render_footer(&mut env);
+    assert!(
+        no_sel.contains("New"),
+        "Plain New hint should always show.\n{no_sel}"
+    );
+    assert!(
+        !no_sel.contains("Here"),
+        "New-from-selection hint should be hidden with no selection.\n{no_sel}"
+    );
+
+    // With a session selected: the `N Here` hint appears.
+    let id = env.view.instances[0].id.clone();
+    env.view.selected_session = Some(id);
+    let with_sel = render_footer(&mut env);
+    assert!(
+        with_sel.contains("Here"),
+        "New-from-selection hint should appear when a session is selected.\n{with_sel}"
+    );
+}
+
 /// `toggle_favorite_at_cursor` flips the cursor's instance favorited state
 /// and persists the change. No toast: the row's visual treatment (bold +
 /// leading `* ` glyph) is the feedback.
